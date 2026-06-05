@@ -45,6 +45,11 @@ type imageCallResult struct {
 	Quality       string
 }
 
+type imagesUpstreamTextTracker struct {
+	text  string
+	delta strings.Builder
+}
+
 type sseFrameAccumulator struct {
 	pending []byte
 }
@@ -1567,6 +1572,7 @@ func (h *OpenAIAPIHandler) collectImagesFromResponses(c *gin.Context, responsesR
 
 func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, errs <-chan *interfaces.ErrorMessage, responseFormat string) ([]byte, *interfaces.ErrorMessage) {
 	acc := &sseFrameAccumulator{}
+	textTracker := &imagesUpstreamTextTracker{}
 
 	processFrame := func(frame []byte) ([]byte, bool, *interfaces.ErrorMessage) {
 		for _, line := range bytes.Split(frame, []byte("\n")) {
@@ -1584,6 +1590,7 @@ func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, e
 			if !json.Valid(payload) {
 				return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("invalid SSE data JSON")}
 			}
+			textTracker.AddEvent(payload)
 
 			if gjson.GetBytes(payload, "type").String() != "response.completed" {
 				continue
@@ -1594,7 +1601,7 @@ func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, e
 				return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
 			}
 			if len(results) == 0 {
-				return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("upstream did not return image output")}
+				return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: imageOutputMissingError(payload, textTracker.Text())}
 			}
 			out, err := buildImagesAPIResponse(results, createdAt, usageRaw, firstMeta, responseFormat)
 			if err != nil {
@@ -1676,6 +1683,88 @@ func extractImagesFromResponsesCompleted(payload []byte) (results []imageCallRes
 	}
 
 	return results, createdAt, usageRaw, firstMeta, nil
+}
+
+func (t *imagesUpstreamTextTracker) AddEvent(payload []byte) {
+	if t == nil || len(payload) == 0 {
+		return
+	}
+	switch gjson.GetBytes(payload, "type").String() {
+	case "response.output_text.delta":
+		t.delta.WriteString(gjson.GetBytes(payload, "delta").String())
+	case "response.output_text.done":
+		t.setText(gjson.GetBytes(payload, "text").String())
+	case "response.output_item.done":
+		t.setText(extractImagesOutputTextFromItem(gjson.GetBytes(payload, "item")))
+	case "response.completed":
+		t.setText(extractImagesOutputTextFromCompleted(payload))
+	}
+}
+
+func (t *imagesUpstreamTextTracker) Text() string {
+	if t == nil {
+		return ""
+	}
+	if text := strings.TrimSpace(t.text); text != "" {
+		return text
+	}
+	return strings.TrimSpace(t.delta.String())
+}
+
+func (t *imagesUpstreamTextTracker) setText(text string) {
+	if t == nil {
+		return
+	}
+	if text = strings.TrimSpace(text); text != "" {
+		t.text = text
+	}
+}
+
+func imageOutputMissingError(completedPayload []byte, fallbackText string) error {
+	text := extractImagesOutputTextFromCompleted(completedPayload)
+	if text == "" {
+		text = strings.TrimSpace(fallbackText)
+	}
+	if text != "" {
+		return fmt.Errorf("upstream did not return image output: %s", text)
+	}
+	return fmt.Errorf("upstream did not return image output")
+}
+
+func extractImagesOutputTextFromCompleted(payload []byte) string {
+	output := gjson.GetBytes(payload, "response.output")
+	if !output.IsArray() {
+		return ""
+	}
+	return extractImagesOutputTextFromItems(output.Array())
+}
+
+func extractImagesOutputTextFromItems(items []gjson.Result) string {
+	var parts []string
+	for _, item := range items {
+		if text := extractImagesOutputTextFromItem(item); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n"))
+}
+
+func extractImagesOutputTextFromItem(item gjson.Result) string {
+	content := item.Get("content")
+	if !content.IsArray() {
+		return strings.TrimSpace(item.Get("text").String())
+	}
+	var parts []string
+	for _, part := range content.Array() {
+		partType := part.Get("type").String()
+		if partType != "" && partType != "output_text" && partType != "text" {
+			continue
+		}
+		if text := strings.TrimSpace(part.Get("text").String()); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n"))
 }
 
 func buildImagesAPIResponse(results []imageCallResult, createdAt int64, usageRaw []byte, firstMeta imageCallResult, responseFormat string) ([]byte, error) {
@@ -1819,6 +1908,7 @@ func (h *OpenAIAPIHandler) streamImagesFromResponses(c *gin.Context, responsesRe
 
 func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, firstChunk []byte, responseFormat string, streamPrefix string, writeEvent func(string, []byte)) {
 	acc := &sseFrameAccumulator{}
+	textTracker := &imagesUpstreamTextTracker{}
 
 	responseFormat = strings.ToLower(strings.TrimSpace(responseFormat))
 	if responseFormat == "" {
@@ -1846,6 +1936,7 @@ func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Conte
 			if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) || !json.Valid(payload) {
 				continue
 			}
+			textTracker.AddEvent(payload)
 
 			switch gjson.GetBytes(payload, "type").String() {
 			case "response.image_generation_call.partial_image":
@@ -1873,7 +1964,7 @@ func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Conte
 					return true
 				}
 				if len(results) == 0 {
-					emitError(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("upstream did not return image output")})
+					emitError(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: imageOutputMissingError(payload, textTracker.Text())})
 					return true
 				}
 				eventName := streamPrefix + ".completed"

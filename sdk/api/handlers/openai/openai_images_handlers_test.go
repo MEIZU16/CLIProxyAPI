@@ -2,6 +2,7 @@ package openai
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -257,6 +258,21 @@ func TestBuildImagesAPIResponseFromXAI(t *testing.T) {
 	}
 	if !gjson.GetBytes(out, "usage").Exists() {
 		t.Fatalf("usage missing: %s", string(out))
+	}
+}
+
+func TestCollectImagesFromResponsesStreamIncludesUpstreamTextWhenImageMissing(t *testing.T) {
+	data := make(chan []byte, 2)
+	data <- []byte("data: {\"type\":\"response.output_text.done\",\"text\":\"I cannot transform this image.\"}\n\n")
+	data <- []byte("data: {\"type\":\"response.completed\",\"response\":{\"created_at\":123,\"output\":[{\"type\":\"image_generation_call\",\"status\":\"failed\"}]}}\n\n")
+	close(data)
+
+	_, errMsg := collectImagesFromResponsesStream(context.Background(), data, nil, "b64_json")
+	if errMsg == nil || errMsg.Error == nil {
+		t.Fatal("expected missing image error")
+	}
+	if !strings.Contains(errMsg.Error.Error(), "I cannot transform this image.") {
+		t.Fatalf("error = %q, want upstream text", errMsg.Error.Error())
 	}
 }
 

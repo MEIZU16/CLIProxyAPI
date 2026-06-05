@@ -48,6 +48,11 @@ type codexImageCallResult struct {
 	Quality       string
 }
 
+type codexImageUpstreamTextTracker struct {
+	text  string
+	delta strings.Builder
+}
+
 func isCodexOpenAIImageRequest(opts cliproxyexecutor.Options) bool {
 	if !strings.EqualFold(strings.TrimSpace(opts.SourceFormat.String()), codexOpenAIImageSourceFormat) {
 		return false
@@ -137,11 +142,13 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
+	textTracker := &codexImageUpstreamTextTracker{}
 	for _, line := range bytes.Split(data, []byte("\n")) {
 		if !bytes.HasPrefix(line, dataTag) {
 			continue
 		}
 		eventData := bytes.TrimSpace(line[len(dataTag):])
+		textTracker.AddEvent(eventData)
 		switch gjson.GetBytes(eventData, "type").String() {
 		case "response.output_item.done":
 			collectCodexOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
@@ -156,7 +163,7 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 				return resp, errExtract
 			}
 			if len(results) == 0 {
-				return resp, statusErr{code: http.StatusBadGateway, msg: "upstream did not return image output"}
+				return resp, statusErr{code: http.StatusBadGateway, msg: codexImageOutputMissingMessage(completedData, textTracker.Text())}
 			}
 			out, errOutput := codexBuildImagesAPIResponse(results, createdAt, usageRaw, firstMeta, prepared.ResponseFormat)
 			if errOutput != nil {
@@ -255,6 +262,7 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
+		textTracker := &codexImageUpstreamTextTracker{}
 		for scanner.Scan() {
 			line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -262,6 +270,7 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 				continue
 			}
 			eventData := bytes.TrimSpace(line[len(dataTag):])
+			textTracker.AddEvent(eventData)
 			switch gjson.GetBytes(eventData, "type").String() {
 			case "response.output_item.done":
 				collectCodexOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
@@ -282,7 +291,7 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 					return
 				}
 				if len(results) == 0 {
-					sendError(statusErr{code: http.StatusBadGateway, msg: "upstream did not return image output"})
+					sendError(statusErr{code: http.StatusBadGateway, msg: codexImageOutputMissingMessage(completedData, textTracker.Text())})
 					return
 				}
 				for _, img := range results {
@@ -614,6 +623,84 @@ func codexExtractImagesFromResponsesCompleted(payload []byte) (results []codexIm
 		usageRaw = []byte(usage.Raw)
 	}
 	return results, createdAt, usageRaw, firstMeta, nil
+}
+
+func (t *codexImageUpstreamTextTracker) AddEvent(payload []byte) {
+	if t == nil || len(payload) == 0 {
+		return
+	}
+	switch gjson.GetBytes(payload, "type").String() {
+	case "response.output_text.delta":
+		t.delta.WriteString(gjson.GetBytes(payload, "delta").String())
+	case "response.output_text.done":
+		t.setText(gjson.GetBytes(payload, "text").String())
+	case "response.output_item.done":
+		t.setText(codexExtractImageOutputTextFromItem(gjson.GetBytes(payload, "item")))
+	case "response.completed":
+		t.setText(codexExtractImageOutputTextFromCompleted(payload))
+	}
+}
+
+func (t *codexImageUpstreamTextTracker) Text() string {
+	if t == nil {
+		return ""
+	}
+	if text := strings.TrimSpace(t.text); text != "" {
+		return text
+	}
+	return strings.TrimSpace(t.delta.String())
+}
+
+func (t *codexImageUpstreamTextTracker) setText(text string) {
+	if t == nil {
+		return
+	}
+	if text = strings.TrimSpace(text); text != "" {
+		t.text = text
+	}
+}
+
+func codexImageOutputMissingMessage(completedPayload []byte, fallbackText string) string {
+	text := codexExtractImageOutputTextFromCompleted(completedPayload)
+	if text == "" {
+		text = strings.TrimSpace(fallbackText)
+	}
+	if text != "" {
+		return "upstream did not return image output: " + text
+	}
+	return "upstream did not return image output"
+}
+
+func codexExtractImageOutputTextFromCompleted(payload []byte) string {
+	output := gjson.GetBytes(payload, "response.output")
+	if !output.IsArray() {
+		return ""
+	}
+	var parts []string
+	for _, item := range output.Array() {
+		if text := codexExtractImageOutputTextFromItem(item); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n"))
+}
+
+func codexExtractImageOutputTextFromItem(item gjson.Result) string {
+	content := item.Get("content")
+	if !content.IsArray() {
+		return strings.TrimSpace(item.Get("text").String())
+	}
+	var parts []string
+	for _, part := range content.Array() {
+		partType := part.Get("type").String()
+		if partType != "" && partType != "output_text" && partType != "text" {
+			continue
+		}
+		if text := strings.TrimSpace(part.Get("text").String()); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n"))
 }
 
 func codexBuildImagesAPIResponse(results []codexImageCallResult, createdAt int64, usageRaw []byte, firstMeta codexImageCallResult, responseFormat string) ([]byte, error) {

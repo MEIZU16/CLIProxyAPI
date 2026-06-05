@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"strings"
 	"testing"
 
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -114,5 +115,16 @@ func TestEnsureImageGenerationTool_FreeCodexAuthDoesNotInjectTool(t *testing.T) 
 	}
 	if gjson.GetBytes(result, "tools").Exists() {
 		t.Fatalf("expected no tools for free codex auth, got %s", gjson.GetBytes(result, "tools").Raw)
+	}
+}
+
+func TestCodexImageOutputMissingMessageIncludesUpstreamText(t *testing.T) {
+	tracker := &codexImageUpstreamTextTracker{}
+	tracker.AddEvent([]byte(`{"type":"response.output_text.done","text":"I cannot transform this image."}`))
+	completed := []byte(`{"type":"response.completed","response":{"created_at":123,"output":[{"type":"image_generation_call","status":"failed"}]}}`)
+
+	got := codexImageOutputMissingMessage(completed, tracker.Text())
+	if !strings.Contains(got, "I cannot transform this image.") {
+		t.Fatalf("message = %q, want upstream text", got)
 	}
 }
