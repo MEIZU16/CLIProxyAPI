@@ -27,7 +27,7 @@ COPY docker-entrypoint.sh /CLIProxyAPI/docker-entrypoint.sh
 
 WORKDIR /CLIProxyAPI
 
-EXPOSE 8317
+EXPOSE 8317 8085 1455 54545 51121 11451
 
 ENV TZ=Asia/Shanghai
 
