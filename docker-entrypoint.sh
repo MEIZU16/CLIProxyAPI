@@ -6,6 +6,7 @@ CONFIG_FILE="${CLI_PROXY_CONFIG_FILE:-${APP_DIR}/config/config.yaml}"
 CONFIG_DIR="$(dirname "$CONFIG_FILE")"
 AUTH_DIR="${CLI_PROXY_AUTH_DIR:-/root/.cli-proxy-api}"
 LOG_DIR="${CLI_PROXY_LOG_DIR:-${APP_DIR}/logs}"
+APP_PORT="${PORT:-${CPA_PORT:-8317}}"
 
 mkdir -p "$CONFIG_DIR" "$AUTH_DIR" "$LOG_DIR"
 
@@ -13,7 +14,7 @@ if [ ! -s "$CONFIG_FILE" ]; then
 	if [ -n "${CPA_API_KEY:-}" ] || [ -n "${CPA_MANAGEMENT_KEY:-}" ]; then
 		cat >"$CONFIG_FILE" <<EOF
 host: ""
-port: ${CPA_PORT:-8317}
+port: ${APP_PORT}
 
 remote-management:
   allow-remote: true
@@ -30,6 +31,14 @@ logs-max-total-size-mb: 100
 EOF
 	else
 		cp "${APP_DIR}/config.example.yaml" "$CONFIG_FILE"
+	fi
+fi
+
+if [ "${CLI_PROXY_SYNC_CONFIG_PORT:-true}" != "false" ]; then
+	if grep -q '^port:' "$CONFIG_FILE"; then
+		sed -i "s/^port:.*/port: ${APP_PORT}/" "$CONFIG_FILE"
+	else
+		printf "\nport: %s\n" "$APP_PORT" >>"$CONFIG_FILE"
 	fi
 fi
 

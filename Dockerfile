@@ -27,9 +27,10 @@ COPY docker-entrypoint.sh /CLIProxyAPI/docker-entrypoint.sh
 
 WORKDIR /CLIProxyAPI
 
-EXPOSE 8317 8085 1455 54545 51121 11451
+EXPOSE 8080
 
-ENV TZ=Asia/Shanghai
+ENV TZ=Asia/Shanghai \
+    PORT=8080
 
 RUN cp /usr/share/zoneinfo/${TZ} /etc/localtime && echo "${TZ}" > /etc/timezone \
     && sed -i 's/\r$//' /CLIProxyAPI/docker-entrypoint.sh \
