@@ -163,7 +163,7 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 				return resp, errExtract
 			}
 			if len(results) == 0 {
-				return resp, statusErr{code: http.StatusBadGateway, msg: codexImageOutputMissingMessage(completedData, textTracker.Text())}
+				return resp, statusErr{code: http.StatusBadGateway, msg: codexImageOutputMissingMessage(eventData, textTracker.Text())}
 			}
 			out, errOutput := codexBuildImagesAPIResponse(results, createdAt, usageRaw, firstMeta, prepared.ResponseFormat)
 			if errOutput != nil {
@@ -290,7 +290,7 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 					return
 				}
 				if len(results) == 0 {
-					sendError(statusErr{code: http.StatusBadGateway, msg: codexImageOutputMissingMessage(completedData, textTracker.Text())})
+					sendError(statusErr{code: http.StatusBadGateway, msg: codexImageOutputMissingMessage(eventData, textTracker.Text())})
 					return
 				}
 				for _, img := range results {
